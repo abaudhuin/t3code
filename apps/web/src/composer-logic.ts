@@ -182,3 +182,15 @@ export function replaceTextRange(
   const nextText = `${text.slice(0, safeStart)}${replacement}${text.slice(safeEnd)}`;
   return { text: nextText, cursor: safeStart + replacement.length };
 }
+
+export function appendTranscriptToPrompt(prompt: string, transcript: string): string {
+  const normalizedTranscript = transcript.trim();
+  if (normalizedTranscript.length === 0) {
+    return prompt;
+  }
+  if (prompt.length === 0) {
+    return normalizedTranscript;
+  }
+  const separator = /\s$/.test(prompt) ? "" : " ";
+  return `${prompt}${separator}${normalizedTranscript}`;
+}

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  appendTranscriptToPrompt,
   detectComposerTrigger,
   expandCollapsedComposerCursor,
   isCollapsedCursorAdjacentToMention,
@@ -136,5 +137,23 @@ describe("parseStandaloneComposerSlashCommand", () => {
 
   it("ignores slash commands with extra message text", () => {
     expect(parseStandaloneComposerSlashCommand("/plan explain this")).toBeNull();
+  });
+});
+
+describe("appendTranscriptToPrompt", () => {
+  it("uses the transcript as the draft when the prompt is empty", () => {
+    expect(appendTranscriptToPrompt("", "hello world")).toBe("hello world");
+  });
+
+  it("adds exactly one space when appending to a non-empty prompt", () => {
+    expect(appendTranscriptToPrompt("hello", "world")).toBe("hello world");
+  });
+
+  it("does not add an extra space when the prompt already ends with whitespace", () => {
+    expect(appendTranscriptToPrompt("hello ", "world")).toBe("hello world");
+  });
+
+  it("ignores blank transcript payloads", () => {
+    expect(appendTranscriptToPrompt("hello", "   ")).toBe("hello");
   });
 });

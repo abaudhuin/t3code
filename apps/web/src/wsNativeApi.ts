@@ -4,6 +4,8 @@ import {
   ORCHESTRATION_WS_METHODS,
   type ContextMenuItem,
   type NativeApi,
+  type VoiceApi,
+  type VoiceSetupState,
   ServerConfigUpdatedPayload,
   TerminalEvent,
   WS_CHANNELS,
@@ -20,6 +22,16 @@ const welcomeListeners = new Set<(payload: WsWelcomePayload) => void>();
 const serverConfigUpdatedListeners = new Set<(payload: ServerConfigUpdatedPayload) => void>();
 let lastWelcome: WsWelcomePayload | null = null;
 let lastServerConfigUpdated: ServerConfigUpdatedPayload | null = null;
+const VOICE_UNSUPPORTED_MESSAGE = "Voice recording is only available in the desktop app.";
+const UNSUPPORTED_VOICE_SETUP_STATE: VoiceSetupState = {
+  status: "error",
+  modelId: "parakeet-tdt-0.6b-v3",
+  modelPath: "",
+  defaultModelPath: "",
+  downloadUrl: null,
+  downloadPercent: null,
+  message: VOICE_UNSUPPORTED_MESSAGE,
+};
 
 const decodeAndWarnOnFailure = <T>(
   schema: Schema.Schema<T> & { readonly DecodingServices: never },
@@ -85,6 +97,37 @@ export function createWsNativeApi(): NativeApi {
   if (instance) return instance.api;
 
   const transport = new WsTransport();
+
+  const unsupportedVoiceApi: VoiceApi = {
+    getState: async () => ({
+      status: "error",
+      modelId: null,
+      message: VOICE_UNSUPPORTED_MESSAGE,
+    }),
+    getSetupState: async () => UNSUPPORTED_VOICE_SETUP_STATE,
+    listModels: async () => [],
+    installModel: async () => {
+      throw new Error(VOICE_UNSUPPORTED_MESSAGE);
+    },
+    setModelPath: async () => {
+      throw new Error(VOICE_UNSUPPORTED_MESSAGE);
+    },
+    setDefaultModel: async () => {
+      throw new Error(VOICE_UNSUPPORTED_MESSAGE);
+    },
+    startRecording: async () => {
+      throw new Error(VOICE_UNSUPPORTED_MESSAGE);
+    },
+    stopRecording: async () => {
+      throw new Error(VOICE_UNSUPPORTED_MESSAGE);
+    },
+    cancelRecording: async () => {
+      throw new Error(VOICE_UNSUPPORTED_MESSAGE);
+    },
+    onState: () => () => undefined,
+    onSetupState: () => () => undefined,
+    onTranscript: () => () => undefined,
+  };
 
   // Listen for server welcome and forward to registered listeners.
   // Also cache it so late subscribers (React effects) get it immediately.
@@ -201,6 +244,7 @@ export function createWsNativeApi(): NativeApi {
           if (payload) callback(payload);
         }),
     },
+    voice: window.desktopBridge?.voice ?? unsupportedVoiceApi,
   };
 
   instance = { api, transport };
