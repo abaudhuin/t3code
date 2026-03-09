@@ -18,6 +18,8 @@ import {
   type ProviderKind,
   type ThreadId,
   type TurnId,
+  type VoiceSetupState,
+  type VoiceState,
   OrchestrationThreadActivity,
   RuntimeMode,
   ProviderInteractionMode,
@@ -54,6 +56,7 @@ import { serverConfigQueryOptions, serverQueryKeys } from "~/lib/serverReactQuer
 import { isElectron } from "../env";
 import { parseDiffRouteSearch, stripDiffSearchParams } from "../diffRouteSearch";
 import {
+  appendTranscriptToPrompt,
   type ComposerSlashCommand,
   type ComposerTrigger,
   type ComposerTriggerKind,
@@ -135,8 +138,10 @@ import {
   DiffIcon,
   EllipsisIcon,
   FolderClosedIcon,
+  LoaderCircleIcon,
   LockIcon,
   LockOpenIcon,
+  MicIcon,
   Undo2Icon,
   XIcon,
   CopyIcon,
@@ -644,6 +649,20 @@ export default function ChatView({ threadId }: ChatViewProps) {
   >({});
   const [sendPhase, setSendPhase] = useState<SendPhase>("idle");
   const [sendStartedAt, setSendStartedAt] = useState<string | null>(null);
+  const [voiceState, setVoiceState] = useState<VoiceState>({
+    status: "idle",
+    modelId: null,
+    message: null,
+  });
+  const [voiceSetupState, setVoiceSetupState] = useState<VoiceSetupState>({
+    status: "missing",
+    modelId: "parakeet-tdt-0.6b-v3",
+    modelPath: "",
+    defaultModelPath: "",
+    downloadUrl: null,
+    downloadPercent: null,
+    message: null,
+  });
   const [isConnecting, _setIsConnecting] = useState(false);
   const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
   const [respondingRequestIds, setRespondingRequestIds] = useState<ApprovalRequestId[]>([]);
@@ -693,6 +712,8 @@ export default function ChatView({ threadId }: ChatViewProps) {
   const attachmentPreviewHandoffByMessageIdRef = useRef<Record<string, string[]>>({});
   const attachmentPreviewHandoffTimeoutByMessageIdRef = useRef<Record<string, number>>({});
   const sendInFlightRef = useRef(false);
+  const voiceErrorMessageRef = useRef<string | null>(null);
+  const submitVoiceTranscriptRef = useRef<null | (() => Promise<void>)>(null);
   const dragDepthRef = useRef(0);
   const terminalOpenByThreadRef = useRef<Record<string, boolean>>({});
   const setMessagesScrollContainerRef = useCallback((element: HTMLDivElement | null) => {
@@ -862,6 +883,10 @@ export default function ChatView({ threadId }: ChatViewProps) {
   const isSendBusy = sendPhase !== "idle";
   const isPreparingWorktree = sendPhase === "preparing-worktree";
   const isWorking = phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint;
+  const isVoiceSupported = isElectron && window.desktopBridge?.voice !== undefined;
+  const isVoiceRecording = voiceState.status === "recording";
+  const isVoiceLoadingModel = voiceState.status === "loading-model";
+  const isVoiceTranscribing = voiceState.status === "transcribing";
   const nowIso = new Date(nowTick).toISOString();
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
     activeLatestTurn,
@@ -959,6 +984,116 @@ export default function ChatView({ threadId }: ChatViewProps) {
     );
     setComposerHighlightedItemId(null);
   }, [activePendingProgress, activePendingUserInput?.requestId]);
+  useEffect(() => {
+    if (!isVoiceSupported) {
+      return;
+    }
+
+    const api = readNativeApi();
+    if (!api) {
+      return;
+    }
+
+    let cancelled = false;
+
+    void api.voice
+      .getSetupState()
+      .then((state) => {
+        if (!cancelled) {
+          setVoiceSetupState(state);
+        }
+      })
+      .catch(() => undefined);
+
+    void api.voice
+      .getState()
+      .then((state) => {
+        if (!cancelled) {
+          setVoiceState(state);
+        }
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setVoiceState({
+          status: "error",
+          modelId: null,
+          message: error instanceof Error ? error.message : "Voice initialization failed.",
+        });
+      });
+
+    const unsubscribeState = api.voice.onState((state) => {
+      setVoiceState(state);
+    });
+    const unsubscribeSetupState = api.voice.onSetupState((state) => {
+      setVoiceSetupState(state);
+    });
+    const unsubscribeTranscript = api.voice.onTranscript((event) => {
+      const nextPrompt = appendTranscriptToPrompt(promptRef.current, event.text);
+      if (nextPrompt === promptRef.current) {
+        return;
+      }
+      promptRef.current = nextPrompt;
+      setPrompt(nextPrompt);
+      setComposerCursor(nextPrompt.length);
+      setComposerTrigger(detectComposerTrigger(nextPrompt, expandCollapsedComposerCursor(nextPrompt, nextPrompt.length)));
+      queueMicrotask(() => {
+        composerEditorRef.current?.focusAtEnd();
+      });
+      if (settings.autoSendVoiceTranscripts) {
+        queueMicrotask(() => {
+          void submitVoiceTranscriptRef.current?.();
+        });
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribeState();
+      unsubscribeSetupState();
+      unsubscribeTranscript();
+    };
+  }, [isVoiceSupported, setPrompt, settings.autoSendVoiceTranscripts]);
+  useEffect(() => {
+    if (voiceState.status !== "error" || !voiceState.message) {
+      if (voiceState.status !== "error") {
+        voiceErrorMessageRef.current = null;
+      }
+      return;
+    }
+    if (voiceErrorMessageRef.current === voiceState.message) {
+      return;
+    }
+    voiceErrorMessageRef.current = voiceState.message;
+    toastManager.add({
+      type: "error",
+      title: "Voice unavailable",
+      description: voiceState.message,
+    });
+  }, [voiceState]);
+  useEffect(() => {
+    if (!isVoiceSupported || voiceState.status !== "recording") {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      const api = readNativeApi();
+      if (!api) {
+        return;
+      }
+      event.preventDefault();
+      void api.voice.cancelRecording().catch(() => undefined);
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isVoiceSupported, voiceState.status]);
   useEffect(() => {
     attachmentPreviewHandoffByMessageIdRef.current = attachmentPreviewHandoffByMessageId;
   }, [attachmentPreviewHandoffByMessageId]);
@@ -2403,7 +2538,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       onAdvanceActivePendingUserInput();
       return;
     }
-    const trimmed = prompt.trim();
+    const trimmed = promptRef.current.trim();
     if (showPlanFollowUpPrompt && activeProposedPlan) {
       const followUp = resolvePlanFollowUpSubmission({
         draftText: trimmed,
@@ -2675,6 +2810,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
       resetSendPhase();
     }
   };
+  submitVoiceTranscriptRef.current = async () => {
+    await onSend();
+  };
 
   const onInterrupt = async () => {
     const api = readNativeApi();
@@ -2686,6 +2824,45 @@ export default function ChatView({ threadId }: ChatViewProps) {
       createdAt: new Date().toISOString(),
     });
   };
+
+  const onVoiceButtonClick = useCallback(() => {
+    if (!isVoiceSupported || isVoiceLoadingModel || isVoiceTranscribing) {
+      return;
+    }
+
+    const api = readNativeApi();
+    if (!api) {
+      return;
+    }
+
+    if (voiceSetupState.status !== "ready") {
+      toastManager.add({
+        type: "info",
+        title: "Set up voice first",
+        description: "Open Settings > Voice to choose a model path or download the Parakeet model.",
+      });
+      void navigate({ to: "/settings" });
+      return;
+    }
+
+    const action =
+      voiceState.status === "recording" ? api.voice.stopRecording() : api.voice.startRecording();
+
+    void action.catch((error) => {
+      toastManager.add({
+        type: "error",
+        title: "Voice failed",
+        description: error instanceof Error ? error.message : "Voice recording failed.",
+      });
+    });
+  }, [
+    isVoiceLoadingModel,
+    isVoiceSupported,
+    isVoiceTranscribing,
+    navigate,
+    voiceSetupState.status,
+    voiceState.status,
+  ]);
 
   const onRespondToApproval = useCallback(
     async (requestId: ApprovalRequestId, decision: ProviderApprovalDecision) => {
@@ -3699,6 +3876,64 @@ export default function ChatView({ threadId }: ChatViewProps) {
                 <div className="flex shrink-0 items-center gap-2">
                   {isPreparingWorktree ? (
                     <span className="text-muted-foreground/70 text-xs">Preparing worktree...</span>
+                  ) : null}
+                  {isVoiceSupported && pendingUserInputs.length === 0 ? (
+                    <>
+                      {isVoiceLoadingModel ? (
+                        <span className="text-muted-foreground/70 text-xs">Loading model...</span>
+                      ) : isVoiceTranscribing ? (
+                        <span className="text-muted-foreground/70 text-xs">Transcribing...</span>
+                      ) : null}
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={isVoiceRecording ? "destructive" : "outline"}
+                        className={cn(
+                          "h-9 rounded-full px-3 sm:h-8",
+                          isVoiceRecording
+                            ? ""
+                            : isVoiceLoadingModel
+                              ? "border-amber-500/40 bg-amber-500/8 text-amber-700 hover:bg-amber-500/12 dark:text-amber-300"
+                              : isVoiceTranscribing
+                                ? "border-sky-500/30 bg-sky-500/8 text-sky-700 hover:bg-sky-500/12 dark:text-sky-300"
+                                : "",
+                        )}
+                        onClick={onVoiceButtonClick}
+                        disabled={
+                          isSendBusy ||
+                          isConnecting ||
+                          phase === "running" ||
+                          isVoiceLoadingModel ||
+                          isVoiceTranscribing
+                        }
+                        aria-label={
+                          isVoiceRecording
+                            ? "Stop voice recording"
+                            : isVoiceLoadingModel
+                              ? "Loading voice model"
+                            : isVoiceTranscribing
+                              ? "Transcribing voice recording"
+                              : "Start voice recording"
+                        }
+                        title={
+                          isVoiceRecording
+                            ? "Stop recording"
+                            : isVoiceLoadingModel
+                              ? "Loading voice model..."
+                            : isVoiceTranscribing
+                              ? "Transcribing..."
+                              : "Record with local Parakeet"
+                        }
+                      >
+                        {isVoiceLoadingModel ? (
+                          <MicIcon className="size-4 animate-pulse" />
+                        ) : isVoiceTranscribing ? (
+                          <LoaderCircleIcon className="size-4 animate-spin" />
+                        ) : (
+                          <MicIcon className={cn("size-4", isVoiceRecording ? "animate-pulse" : undefined)} />
+                        )}
+                      </Button>
+                    </>
                   ) : null}
                   {activePendingProgress ? (
                     <div className="flex items-center gap-2">

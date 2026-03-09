@@ -365,6 +365,113 @@ describe("wsNativeApi", () => {
     });
   });
 
+  it("delegates voice calls to the desktop bridge when available", async () => {
+    const voiceState = {
+      status: "idle",
+      modelId: "parakeet-tdt-0.6b-v3",
+      message: null,
+    } as const;
+    const voiceSetupState = {
+      status: "ready",
+      modelId: "parakeet-tdt-0.6b-v3",
+      modelPath: "/tmp/parakeet",
+      defaultModelPath: "/tmp/parakeet",
+      downloadUrl: "https://huggingface.co/maxkulish/parakeet-tdt-0.6b-v3",
+      downloadPercent: null,
+      message: "Voice model ready.",
+    } as const;
+    const transcript = {
+      text: "hello from voice",
+      final: true,
+      modelId: "parakeet-tdt-0.6b-v3",
+    } as const;
+    const getState = vi.fn().mockResolvedValue(voiceState);
+    const getSetupState = vi.fn().mockResolvedValue(voiceSetupState);
+    const startRecording = vi.fn().mockResolvedValue(undefined);
+    const onState = vi.fn().mockImplementation((listener: (state: typeof voiceState) => void) => {
+      listener(voiceState);
+      return () => undefined;
+    });
+    const onSetupState = vi
+      .fn()
+      .mockImplementation((listener: (state: typeof voiceSetupState) => void) => {
+        listener(voiceSetupState);
+        return () => undefined;
+      });
+    const onTranscript = vi
+      .fn()
+      .mockImplementation((listener: (event: typeof transcript) => void) => {
+        listener(transcript);
+        return () => undefined;
+      });
+    Object.defineProperty(getWindowForTest(), "desktopBridge", {
+      configurable: true,
+      writable: true,
+      value: {
+        voice: {
+          getState,
+          getSetupState,
+          listModels: vi.fn().mockResolvedValue([]),
+          installModel: vi.fn().mockResolvedValue(undefined),
+          setModelPath: vi.fn().mockResolvedValue(voiceSetupState),
+          setDefaultModel: vi.fn().mockResolvedValue(undefined),
+          startRecording,
+          stopRecording: vi.fn().mockResolvedValue(undefined),
+          cancelRecording: vi.fn().mockResolvedValue(undefined),
+          onState,
+          onSetupState,
+          onTranscript,
+        },
+      },
+    });
+
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+    const stateListener = vi.fn();
+    const setupStateListener = vi.fn();
+    const transcriptListener = vi.fn();
+
+    expect(await api.voice.getState()).toEqual(voiceState);
+    expect(await api.voice.getSetupState()).toEqual(voiceSetupState);
+    await api.voice.startRecording();
+    api.voice.onState(stateListener);
+    api.voice.onSetupState(setupStateListener);
+    api.voice.onTranscript(transcriptListener);
+
+    expect(getState).toHaveBeenCalledTimes(1);
+    expect(getSetupState).toHaveBeenCalledTimes(1);
+    expect(startRecording).toHaveBeenCalledTimes(1);
+    expect(onState).toHaveBeenCalledTimes(1);
+    expect(onSetupState).toHaveBeenCalledTimes(1);
+    expect(onTranscript).toHaveBeenCalledTimes(1);
+    expect(stateListener).toHaveBeenCalledWith(voiceState);
+    expect(setupStateListener).toHaveBeenCalledWith(voiceSetupState);
+    expect(transcriptListener).toHaveBeenCalledWith(transcript);
+  });
+
+  it("returns a stable unsupported voice api in non-desktop mode", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+
+    await expect(api.voice.getState()).resolves.toEqual({
+      status: "error",
+      modelId: null,
+      message: "Voice recording is only available in the desktop app.",
+    });
+    await expect(api.voice.getSetupState()).resolves.toEqual({
+      status: "error",
+      modelId: "parakeet-tdt-0.6b-v3",
+      modelPath: "",
+      defaultModelPath: "",
+      downloadUrl: null,
+      downloadPercent: null,
+      message: "Voice recording is only available in the desktop app.",
+    });
+    await expect(api.voice.startRecording()).rejects.toThrow(
+      "Voice recording is only available in the desktop app.",
+    );
+  });
+
   it("forwards context menu metadata to desktop bridge", async () => {
     const showContextMenu = vi.fn().mockResolvedValue("delete");
     Object.defineProperty(getWindowForTest(), "desktopBridge", {

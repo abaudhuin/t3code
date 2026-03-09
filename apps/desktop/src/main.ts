@@ -4,10 +4,25 @@ import * as FS from "node:fs";
 import * as OS from "node:os";
 import * as Path from "node:path";
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  nativeImage,
+  protocol,
+  shell,
+} from "electron";
 import type { MenuItemConstructorOptions } from "electron";
 import * as Effect from "effect/Effect";
-import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/contracts";
+import type {
+  DesktopUpdateActionResult,
+  DesktopUpdateState,
+  VoiceSetupState,
+  VoiceState,
+  VoiceTranscriptEvent,
+} from "@t3tools/contracts";
 import { autoUpdater } from "electron-updater";
 
 import type { ContextMenuItem } from "@t3tools/contracts";
@@ -31,6 +46,7 @@ import {
   reduceDesktopUpdateStateOnNoUpdate,
   reduceDesktopUpdateStateOnUpdateAvailable,
 } from "./updateMachine";
+import { VoiceSidecarRuntime } from "./voiceRuntime";
 
 fixPath();
 
@@ -43,6 +59,18 @@ const UPDATE_STATE_CHANNEL = "desktop:update-state";
 const UPDATE_GET_STATE_CHANNEL = "desktop:update-get-state";
 const UPDATE_DOWNLOAD_CHANNEL = "desktop:update-download";
 const UPDATE_INSTALL_CHANNEL = "desktop:update-install";
+const VOICE_STATE_CHANNEL = "desktop:voice-state";
+const VOICE_SETUP_STATE_CHANNEL = "desktop:voice-setup-state";
+const VOICE_TRANSCRIPT_CHANNEL = "desktop:voice-transcript";
+const VOICE_GET_STATE_CHANNEL = "desktop:voice-get-state";
+const VOICE_GET_SETUP_STATE_CHANNEL = "desktop:voice-get-setup-state";
+const VOICE_LIST_MODELS_CHANNEL = "desktop:voice-list-models";
+const VOICE_INSTALL_MODEL_CHANNEL = "desktop:voice-install-model";
+const VOICE_SET_MODEL_PATH_CHANNEL = "desktop:voice-set-model-path";
+const VOICE_SET_DEFAULT_MODEL_CHANNEL = "desktop:voice-set-default-model";
+const VOICE_START_RECORDING_CHANNEL = "desktop:voice-start-recording";
+const VOICE_STOP_RECORDING_CHANNEL = "desktop:voice-stop-recording";
+const VOICE_CANCEL_RECORDING_CHANNEL = "desktop:voice-cancel-recording";
 const STATE_DIR =
   process.env.T3CODE_STATE_DIR?.trim() || Path.join(OS.homedir(), ".t3", "userdata");
 const DESKTOP_SCHEME = "t3";
@@ -76,6 +104,7 @@ let aboutCommitHashCache: string | null | undefined;
 let desktopLogSink: RotatingFileSink | null = null;
 let backendLogSink: RotatingFileSink | null = null;
 let restoreStdIoCapture: (() => void) | null = null;
+let voiceRuntime: VoiceSidecarRuntime | null = null;
 
 let destructiveMenuIconCache: Electron.NativeImage | null | undefined;
 const initialUpdateState = (): DesktopUpdateState => createInitialDesktopUpdateState(app.getVersion());
@@ -613,6 +642,27 @@ function emitUpdateState(): void {
   }
 }
 
+function emitVoiceState(state: VoiceState): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window.isDestroyed()) continue;
+    window.webContents.send(VOICE_STATE_CHANNEL, state);
+  }
+}
+
+function emitVoiceSetupState(state: VoiceSetupState): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window.isDestroyed()) continue;
+    window.webContents.send(VOICE_SETUP_STATE_CHANNEL, state);
+  }
+}
+
+function emitVoiceTranscript(event: VoiceTranscriptEvent): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window.isDestroyed()) continue;
+    window.webContents.send(VOICE_TRANSCRIPT_CHANNEL, event);
+  }
+}
+
 function setUpdateState(patch: Partial<DesktopUpdateState>): void {
   updateState = { ...updateState, ...patch };
   emitUpdateState();
@@ -801,6 +851,34 @@ function backendEnv(): NodeJS.ProcessEnv {
     T3CODE_STATE_DIR: STATE_DIR,
     T3CODE_AUTH_TOKEN: backendAuthToken,
   };
+}
+
+function getVoiceRuntime(): VoiceSidecarRuntime {
+  if (voiceRuntime) {
+    return voiceRuntime;
+  }
+
+  voiceRuntime = new VoiceSidecarRuntime({
+    stateDir: STATE_DIR,
+    repoRoot: ROOT_DIR,
+    isPackaged: app.isPackaged,
+    onState: emitVoiceState,
+    onSetupState: emitVoiceSetupState,
+    onTranscript: emitVoiceTranscript,
+    onLog: (level, message) => {
+      const line = `[desktop-voice] ${message}`;
+      if (level === "error") {
+        console.error(line);
+        return;
+      }
+      if (level === "warn") {
+        console.warn(line);
+        return;
+      }
+      console.info(line);
+    },
+  });
+  return voiceRuntime;
 }
 
 function scheduleBackendRestart(reason: string): void {
@@ -1085,6 +1163,56 @@ function registerIpcHandlers(): void {
       state: updateState,
     } satisfies DesktopUpdateActionResult;
   });
+
+  ipcMain.removeHandler(VOICE_GET_STATE_CHANNEL);
+  ipcMain.handle(VOICE_GET_STATE_CHANNEL, async () => getVoiceRuntime().getState());
+
+  ipcMain.removeHandler(VOICE_GET_SETUP_STATE_CHANNEL);
+  ipcMain.handle(VOICE_GET_SETUP_STATE_CHANNEL, async () => getVoiceRuntime().getSetupState());
+
+  ipcMain.removeHandler(VOICE_LIST_MODELS_CHANNEL);
+  ipcMain.handle(VOICE_LIST_MODELS_CHANNEL, async () => getVoiceRuntime().listModels());
+
+  ipcMain.removeHandler(VOICE_INSTALL_MODEL_CHANNEL);
+  ipcMain.handle(VOICE_INSTALL_MODEL_CHANNEL, async (_event, input: unknown) => {
+    if (!input || typeof input !== "object" || typeof (input as { modelId?: unknown }).modelId !== "string") {
+      throw new Error("Missing voice model id.");
+    }
+    await getVoiceRuntime().installModel({ modelId: (input as { modelId: string }).modelId });
+  });
+
+  ipcMain.removeHandler(VOICE_SET_MODEL_PATH_CHANNEL);
+  ipcMain.handle(VOICE_SET_MODEL_PATH_CHANNEL, async (_event, input: unknown) => {
+    if (!input || typeof input !== "object" || typeof (input as { modelPath?: unknown }).modelPath !== "string") {
+      throw new Error("Missing voice model path.");
+    }
+    return await getVoiceRuntime().setModelPath({
+      modelPath: (input as { modelPath: string }).modelPath,
+    });
+  });
+
+  ipcMain.removeHandler(VOICE_SET_DEFAULT_MODEL_CHANNEL);
+  ipcMain.handle(VOICE_SET_DEFAULT_MODEL_CHANNEL, async (_event, input: unknown) => {
+    if (!input || typeof input !== "object" || typeof (input as { modelId?: unknown }).modelId !== "string") {
+      throw new Error("Missing voice model id.");
+    }
+    await getVoiceRuntime().setDefaultModel({ modelId: (input as { modelId: string }).modelId });
+  });
+
+  ipcMain.removeHandler(VOICE_START_RECORDING_CHANNEL);
+  ipcMain.handle(VOICE_START_RECORDING_CHANNEL, async () => {
+    await getVoiceRuntime().startRecording();
+  });
+
+  ipcMain.removeHandler(VOICE_STOP_RECORDING_CHANNEL);
+  ipcMain.handle(VOICE_STOP_RECORDING_CHANNEL, async () => {
+    await getVoiceRuntime().stopRecording();
+  });
+
+  ipcMain.removeHandler(VOICE_CANCEL_RECORDING_CHANNEL);
+  ipcMain.handle(VOICE_CANCEL_RECORDING_CHANNEL, async () => {
+    await getVoiceRuntime().cancelRecording();
+  });
 }
 
 function getIconOption(): { icon: string } | Record<string, never> {
@@ -1122,6 +1250,8 @@ function createWindow(): BrowserWindow {
   window.webContents.on("did-finish-load", () => {
     window.setTitle(APP_DISPLAY_NAME);
     emitUpdateState();
+    emitVoiceState(getVoiceRuntime().getState());
+    emitVoiceSetupState(getVoiceRuntime().getSetupState());
   });
   window.once("ready-to-show", () => {
     window.show();
@@ -1158,6 +1288,8 @@ async function bootstrap(): Promise<void> {
   process.env.T3CODE_DESKTOP_WS_URL = backendWsUrl;
   writeDesktopLogHeader(`bootstrap resolved websocket url=${backendWsUrl}`);
 
+  getVoiceRuntime().start();
+  writeDesktopLogHeader("bootstrap voice runtime start requested");
   registerIpcHandlers();
   writeDesktopLogHeader("bootstrap ipc handlers registered");
   startBackend();
@@ -1171,6 +1303,7 @@ app.on("before-quit", () => {
   writeDesktopLogHeader("before-quit received");
   clearUpdatePollTimer();
   stopBackend();
+  void voiceRuntime?.shutdown();
   restoreStdIoCapture?.();
 });
 
@@ -1209,6 +1342,7 @@ if (process.platform !== "win32") {
     writeDesktopLogHeader("SIGINT received");
     clearUpdatePollTimer();
     stopBackend();
+    void voiceRuntime?.shutdown();
     restoreStdIoCapture?.();
     app.quit();
   });
@@ -1219,6 +1353,7 @@ if (process.platform !== "win32") {
     writeDesktopLogHeader("SIGTERM received");
     clearUpdatePollTimer();
     stopBackend();
+    void voiceRuntime?.shutdown();
     restoreStdIoCapture?.();
     app.quit();
   });

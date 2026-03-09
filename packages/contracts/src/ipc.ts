@@ -77,6 +77,54 @@ export interface DesktopUpdateActionResult {
   state: DesktopUpdateState;
 }
 
+export type VoiceStatus = "idle" | "recording" | "loading-model" | "transcribing" | "error";
+export type VoiceSetupStatus = "ready" | "missing" | "downloading" | "error";
+
+export interface VoiceState {
+  status: VoiceStatus;
+  modelId: string | null;
+  message: string | null;
+}
+
+export interface VoiceSetupState {
+  status: VoiceSetupStatus;
+  modelId: string;
+  modelPath: string;
+  defaultModelPath: string;
+  downloadUrl: string | null;
+  downloadPercent: number | null;
+  message: string | null;
+}
+
+export interface VoiceModel {
+  id: string;
+  displayName: string;
+  installed: boolean;
+  isDefault: boolean;
+  downloadSizeBytes: number | null;
+}
+
+export interface VoiceTranscriptEvent {
+  text: string;
+  final: true;
+  modelId: string;
+}
+
+export interface VoiceApi {
+  getState: () => Promise<VoiceState>;
+  getSetupState: () => Promise<VoiceSetupState>;
+  listModels: () => Promise<VoiceModel[]>;
+  installModel: (input: { modelId: string }) => Promise<void>;
+  setModelPath: (input: { modelPath: string }) => Promise<VoiceSetupState>;
+  setDefaultModel: (input: { modelId: string }) => Promise<void>;
+  startRecording: () => Promise<void>;
+  stopRecording: () => Promise<void>;
+  cancelRecording: () => Promise<void>;
+  onState: (listener: (state: VoiceState) => void) => () => void;
+  onSetupState: (listener: (state: VoiceSetupState) => void) => () => void;
+  onTranscript: (listener: (event: VoiceTranscriptEvent) => void) => () => void;
+}
+
 export interface DesktopBridge {
   getWsUrl: () => string | null;
   pickFolder: () => Promise<string | null>;
@@ -91,6 +139,7 @@ export interface DesktopBridge {
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   installUpdate: () => Promise<DesktopUpdateActionResult>;
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void;
+  voice: VoiceApi;
 }
 
 export interface NativeApi {
@@ -148,4 +197,5 @@ export interface NativeApi {
     replayEvents: (fromSequenceExclusive: number) => Promise<OrchestrationEvent[]>;
     onDomainEvent: (callback: (event: OrchestrationEvent) => void) => () => void;
   };
+  voice: VoiceApi;
 }

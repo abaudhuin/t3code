@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { useCallback, useState } from "react";
-import { type ProviderKind } from "@t3tools/contracts";
+import { useCallback, useEffect, useState } from "react";
+import { type ProviderKind, type VoiceModel, type VoiceSetupState } from "@t3tools/contracts";
 import { getModelOptions, normalizeModelSlug } from "@t3tools/shared/model";
 import { ZapIcon } from "lucide-react";
 
@@ -56,6 +56,18 @@ const MODEL_PROVIDER_SETTINGS: Array<{
   },
 ] as const;
 
+function createInitialVoiceSetupState(): VoiceSetupState {
+  return {
+    status: "missing",
+    modelId: "parakeet-tdt-0.6b-v3",
+    modelPath: "",
+    defaultModelPath: "",
+    downloadUrl: null,
+    downloadPercent: null,
+    message: null,
+  };
+}
+
 function getCustomModelsForProvider(
   settings: ReturnType<typeof useAppSettings>["settings"],
   provider: ProviderKind,
@@ -86,6 +98,31 @@ function patchCustomModels(provider: ProviderKind, models: string[]) {
   }
 }
 
+function getVoiceStatusMessage(state: VoiceSetupState, isLoading: boolean, error: string | null): string {
+  if (error) {
+    return error;
+  }
+  if (isLoading) {
+    return "Checking voice setup...";
+  }
+  if (state.status === "ready") {
+    return "Voice is ready.";
+  }
+  if (state.status === "downloading") {
+    return state.downloadPercent === null
+      ? "Downloading voice model..."
+      : `Downloading voice model... ${state.downloadPercent}%`;
+  }
+  if (state.message) {
+    return state.message;
+  }
+  return "Voice is not configured yet.";
+}
+
+function getVoiceModelLabel(model: VoiceModel): string {
+  return model.installed ? `${model.displayName} (installed)` : model.displayName;
+}
+
 function SettingsRouteView() {
   const { theme, setTheme, resolvedTheme } = useTheme();
   const { settings, defaults, updateSettings } = useAppSettings();
@@ -100,11 +137,107 @@ function SettingsRouteView() {
   const [customModelErrorByProvider, setCustomModelErrorByProvider] = useState<
     Partial<Record<ProviderKind, string | null>>
   >({});
+  const [voiceSetupState, setVoiceSetupState] = useState<VoiceSetupState>(createInitialVoiceSetupState);
+  const [voiceModels, setVoiceModels] = useState<VoiceModel[]>([]);
+  const [isVoiceSetupLoading, setIsVoiceSetupLoading] = useState(isElectron);
+  const [isVoiceModelsLoading, setIsVoiceModelsLoading] = useState(isElectron);
+  const [voiceModelPathInput, setVoiceModelPathInput] = useState("");
+  const [isVoiceModelPathDirty, setIsVoiceModelPathDirty] = useState(false);
+  const [voiceSetupError, setVoiceSetupError] = useState<string | null>(null);
+  const [isSavingVoiceModelPath, setIsSavingVoiceModelPath] = useState(false);
+  const [isInstallingVoiceModel, setIsInstallingVoiceModel] = useState(false);
+  const [isChangingVoiceModel, setIsChangingVoiceModel] = useState(false);
 
   const codexBinaryPath = settings.codexBinaryPath;
   const codexHomePath = settings.codexHomePath;
   const codexServiceTier = settings.codexServiceTier;
   const keybindingsConfigPath = serverConfigQuery.data?.keybindingsConfigPath ?? null;
+  const normalizedVoiceModelPathInput = voiceModelPathInput.trim();
+  const selectedVoiceModel = voiceModels.find((model) => model.id === voiceSetupState.modelId) ?? null;
+  const selectedVoiceModelInstalled = selectedVoiceModel?.installed ?? voiceSetupState.status === "ready";
+  const voiceStatusMessage = getVoiceStatusMessage(
+    voiceSetupState,
+    isVoiceSetupLoading,
+    voiceSetupError,
+  );
+  const isVoiceActionBusy =
+    isVoiceSetupLoading ||
+    isVoiceModelsLoading ||
+    isSavingVoiceModelPath ||
+    isInstallingVoiceModel ||
+    isChangingVoiceModel;
+
+  useEffect(() => {
+    if (!isElectron) {
+      return;
+    }
+
+    const api = ensureNativeApi();
+    let cancelled = false;
+
+    void api.voice
+      .getSetupState()
+      .then((state) => {
+        if (cancelled) {
+          return;
+        }
+        setVoiceSetupState(state);
+        setIsVoiceSetupLoading(false);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setIsVoiceSetupLoading(false);
+        }
+      });
+
+    void api.voice
+      .listModels()
+      .then((models) => {
+        if (cancelled) {
+          return;
+        }
+        setVoiceModels(models);
+        setIsVoiceModelsLoading(false);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setIsVoiceModelsLoading(false);
+        }
+      });
+
+    const unsubscribe = api.voice.onSetupState((state) => {
+      if (cancelled) {
+        return;
+      }
+      setVoiceSetupState(state);
+      setIsVoiceSetupLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isVoiceModelPathDirty) {
+      return;
+    }
+    setVoiceModelPathInput(voiceSetupState.modelPath);
+  }, [isVoiceModelPathDirty, voiceSetupState.modelPath]);
+
+  const refreshVoiceModels = useCallback(async () => {
+    if (!isElectron) {
+      return;
+    }
+    setIsVoiceModelsLoading(true);
+    try {
+      const api = ensureNativeApi();
+      setVoiceModels(await api.voice.listModels());
+    } finally {
+      setIsVoiceModelsLoading(false);
+    }
+  }, []);
 
   const openKeybindingsFile = useCallback(() => {
     if (!keybindingsConfigPath) return;
@@ -122,6 +255,101 @@ function SettingsRouteView() {
         setIsOpeningKeybindings(false);
       });
   }, [keybindingsConfigPath]);
+
+  const saveVoiceModelPath = useCallback(async () => {
+    if (!isElectron) {
+      return;
+    }
+    const nextPath = normalizedVoiceModelPathInput;
+    if (nextPath.length === 0) {
+      setVoiceSetupError("Enter a model directory path.");
+      return;
+    }
+    setVoiceSetupError(null);
+    setIsSavingVoiceModelPath(true);
+    try {
+      const api = ensureNativeApi();
+      const nextState = await api.voice.setModelPath({ modelPath: nextPath });
+      setVoiceSetupState(nextState);
+      setVoiceModelPathInput(nextState.modelPath);
+      setIsVoiceModelPathDirty(false);
+      await refreshVoiceModels();
+    } catch (error) {
+      setVoiceSetupError(error instanceof Error ? error.message : "Unable to save voice model path.");
+    } finally {
+      setIsSavingVoiceModelPath(false);
+    }
+  }, [normalizedVoiceModelPathInput, refreshVoiceModels]);
+
+  const chooseVoiceModelFolder = useCallback(async () => {
+    if (!isElectron) {
+      return;
+    }
+    setVoiceSetupError(null);
+    try {
+      const api = ensureNativeApi();
+      const pickedFolder = await api.dialogs.pickFolder();
+      if (!pickedFolder) {
+        return;
+      }
+      setVoiceModelPathInput(pickedFolder);
+      setIsVoiceModelPathDirty(true);
+    } catch (error) {
+      setVoiceSetupError(error instanceof Error ? error.message : "Unable to choose a voice model folder.");
+    }
+  }, []);
+
+  const installVoiceModel = useCallback(async () => {
+    if (!isElectron || selectedVoiceModelInstalled) {
+      return;
+    }
+    setVoiceSetupError(null);
+    setIsInstallingVoiceModel(true);
+    try {
+      const api = ensureNativeApi();
+      if (
+        normalizedVoiceModelPathInput.length > 0 &&
+        normalizedVoiceModelPathInput !== voiceSetupState.modelPath
+      ) {
+        const nextState = await api.voice.setModelPath({ modelPath: normalizedVoiceModelPathInput });
+        setVoiceSetupState(nextState);
+        setVoiceModelPathInput(nextState.modelPath);
+        setIsVoiceModelPathDirty(false);
+      }
+      await api.voice.installModel({ modelId: voiceSetupState.modelId });
+      await refreshVoiceModels();
+    } catch (error) {
+      setVoiceSetupError(error instanceof Error ? error.message : "Unable to install the voice model.");
+    } finally {
+      setIsInstallingVoiceModel(false);
+    }
+  }, [
+    normalizedVoiceModelPathInput,
+    refreshVoiceModels,
+    selectedVoiceModelInstalled,
+    voiceSetupState.modelId,
+    voiceSetupState.modelPath,
+  ]);
+
+  const setDefaultVoiceModel = useCallback(
+    async (modelId: string) => {
+      if (!isElectron || !modelId || modelId === voiceSetupState.modelId) {
+        return;
+      }
+      setVoiceSetupError(null);
+      setIsChangingVoiceModel(true);
+      try {
+        const api = ensureNativeApi();
+        await api.voice.setDefaultModel({ modelId });
+        await refreshVoiceModels();
+      } catch (error) {
+        setVoiceSetupError(error instanceof Error ? error.message : "Unable to change the voice model.");
+      } finally {
+        setIsChangingVoiceModel(false);
+      }
+    },
+    [refreshVoiceModels, voiceSetupState.modelId],
+  );
 
   const addCustomModel = useCallback((provider: ProviderKind) => {
     const customModelInput = customModelInputByProvider[provider];
@@ -596,6 +824,152 @@ function SettingsRouteView() {
                   </Button>
                 </div>
               ) : null}
+            </section>
+
+            <section className="rounded-2xl border border-border bg-card p-5">
+              <div className="mb-4">
+                <h2 className="text-sm font-medium text-foreground">Voice</h2>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Configure local voice transcription for the desktop app.
+                </p>
+              </div>
+
+              {!isElectron ? (
+                <p className="text-xs text-muted-foreground">
+                  Voice recording is only available in the desktop app.
+                </p>
+              ) : (
+                <div className="space-y-4">
+                  <div className="rounded-lg border border-border bg-background px-3 py-2">
+                    <p className="text-xs font-medium text-foreground">Status</p>
+                    <p className="mt-1 text-xs text-muted-foreground">{voiceStatusMessage}</p>
+                  </div>
+
+                  <label className="block space-y-1">
+                    <span className="text-xs font-medium text-foreground">Default model</span>
+                    {voiceModels.length > 0 ? (
+                      <Select
+                        items={voiceModels.map((model) => ({
+                          label: getVoiceModelLabel(model),
+                          value: model.id,
+                        }))}
+                        value={voiceSetupState.modelId}
+                        onValueChange={(value) => {
+                          if (!value) return;
+                          void setDefaultVoiceModel(value);
+                        }}
+                        disabled={!isElectron || isVoiceModelsLoading || isChangingVoiceModel}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectPopup alignItemWithTrigger={false}>
+                          {voiceModels.map((model) => (
+                            <SelectItem key={model.id} value={model.id}>
+                              {getVoiceModelLabel(model)}
+                            </SelectItem>
+                          ))}
+                        </SelectPopup>
+                      </Select>
+                    ) : (
+                      <div className="rounded-lg border border-dashed border-border bg-background px-3 py-4 text-xs text-muted-foreground">
+                        {isVoiceModelsLoading
+                          ? "Loading voice models..."
+                          : "No voice models available."}
+                      </div>
+                    )}
+                  </label>
+
+                  <label htmlFor="voice-model-path" className="block space-y-1">
+                    <span className="text-xs font-medium text-foreground">Model path</span>
+                    <Input
+                      id="voice-model-path"
+                      value={voiceModelPathInput}
+                      onChange={(event) => {
+                        setVoiceModelPathInput(event.target.value);
+                        setIsVoiceModelPathDirty(true);
+                        if (voiceSetupError) {
+                          setVoiceSetupError(null);
+                        }
+                      }}
+                      placeholder={voiceSetupState.defaultModelPath || "/path/to/parakeet-model"}
+                      spellCheck={false}
+                    />
+                    <span className="text-xs text-muted-foreground">
+                      Path must contain <code>encoder-model.onnx</code>,{" "}
+                      <code>decoder_joint-model.onnx</code>, and <code>vocab.txt</code>.
+                    </span>
+                  </label>
+
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={chooseVoiceModelFolder}
+                      disabled={isVoiceActionBusy}
+                    >
+                      Choose folder
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => {
+                        setVoiceModelPathInput(voiceSetupState.defaultModelPath);
+                        setIsVoiceModelPathDirty(true);
+                        setVoiceSetupError(null);
+                      }}
+                      disabled={!voiceSetupState.defaultModelPath || isVoiceActionBusy}
+                    >
+                      Use default path
+                    </Button>
+                    <Button
+                      type="button"
+                      onClick={() => void saveVoiceModelPath()}
+                      disabled={isVoiceActionBusy}
+                    >
+                      {isSavingVoiceModelPath ? "Saving..." : "Save path"}
+                    </Button>
+                  </div>
+
+                  {!selectedVoiceModelInstalled ? (
+                    <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background px-3 py-2">
+                      <div>
+                        <p className="text-sm font-medium text-foreground">Install selected model</p>
+                        <p className="text-xs text-muted-foreground">
+                          Download the current model to the configured path.
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        onClick={() => void installVoiceModel()}
+                        disabled={isVoiceActionBusy || voiceSetupState.status === "downloading"}
+                      >
+                        {isInstallingVoiceModel || voiceSetupState.status === "downloading"
+                          ? "Installing..."
+                          : "Install model"}
+                      </Button>
+                    </div>
+                  ) : null}
+
+                  <div className="flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
+                    <div>
+                      <p className="text-sm font-medium text-foreground">Auto-send voice transcripts</p>
+                      <p className="text-xs text-muted-foreground">
+                        Send the transcribed prompt immediately after recording stops.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.autoSendVoiceTranscripts}
+                      onCheckedChange={(checked) =>
+                        updateSettings({
+                          autoSendVoiceTranscripts: Boolean(checked),
+                        })
+                      }
+                      aria-label="Auto-send voice transcripts"
+                    />
+                  </div>
+                </div>
+              )}
             </section>
           </div>
         </div>

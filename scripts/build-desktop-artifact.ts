@@ -13,8 +13,8 @@ import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Config, Data, Effect, FileSystem, Layer, Logger, Option, Path, Schema } from "effect";
-import { Command, Flag } from "effect/unstable/cli";
+import { Config, Data, Effect, FileSystem, Logger, Option, Path, Schema } from "effect";
+import { CliError, Command, Flag } from "effect/unstable/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
@@ -115,6 +115,10 @@ function resolveGitCommitHash(repoRoot: string): string {
     return "unknown";
   }
   return hash.toLowerCase();
+}
+
+function voiceSidecarExecutableName(platform: typeof BuildPlatform.Type): string {
+  return platform === "win" ? "t3-voice.exe" : "t3-voice";
 }
 
 function resolvePythonForNodeGyp(): string | undefined {
@@ -567,6 +571,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
 
   const stageAppDir = path.join(stageRoot, "app");
   const stageResourcesDir = path.join(stageAppDir, "apps/desktop/resources");
+  const voiceSidecarDir = path.join(repoRoot, "apps/voice-sidecar");
+  const voiceSidecarBinary = path.join(
+    voiceSidecarDir,
+    "target",
+    "release",
+    voiceSidecarExecutableName(options.platform),
+  );
   const distDirs = {
     desktopDist: path.join(repoRoot, "apps/desktop/dist-electron"),
     desktopResources: path.join(repoRoot, "apps/desktop/resources"),
@@ -581,6 +592,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
         cwd: repoRoot,
         ...commandOutputOptions(options.verbose),
       })`bun run build:desktop`,
+    );
+    yield* Effect.log("[desktop-artifact] Building voice sidecar...");
+    yield* runCommand(
+      ChildProcess.make({
+        cwd: voiceSidecarDir,
+        ...commandOutputOptions(options.verbose),
+      })`cargo build --release`,
     );
   }
 
@@ -598,6 +616,12 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     });
   }
 
+  if (!(yield* fs.exists(voiceSidecarBinary))) {
+    return yield* new BuildScriptError({
+      message: `Missing voice sidecar binary at ${voiceSidecarBinary}. Run 'cargo build --release' in apps/voice-sidecar first.`,
+    });
+  }
+
   yield* validateBundledClientAssets(path.dirname(bundledClientEntry));
 
   yield* fs.makeDirectory(path.join(stageAppDir, "apps/desktop"), { recursive: true });
@@ -607,6 +631,11 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   yield* fs.copy(distDirs.desktopDist, path.join(stageAppDir, "apps/desktop/dist-electron"));
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
   yield* fs.copy(distDirs.serverDist, path.join(stageAppDir, "apps/server/dist"));
+  yield* fs.makeDirectory(path.join(stageResourcesDir, "bin"), { recursive: true });
+  yield* fs.copy(
+    voiceSidecarBinary,
+    path.join(stageResourcesDir, "bin", voiceSidecarExecutableName(options.platform)),
+  );
 
   yield* assertPlatformBuildResources(options.platform, stageResourcesDir, options.verbose);
 
@@ -763,10 +792,17 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   Command.withHandler((input) => Effect.flatMap(resolveBuildOptions(input), buildDesktopArtifact)),
 );
 
-const cliRuntimeLayer = Layer.mergeAll(Logger.layer([Logger.consolePretty()]), NodeServices.layer);
-
-Command.run(buildDesktopArtifactCli, { version: "0.0.0" }).pipe(
+const runtimeProgram = Command.run(buildDesktopArtifactCli, { version: "0.0.0" }).pipe(
   Effect.scoped,
-  Effect.provide(cliRuntimeLayer),
-  NodeRuntime.runMain,
+  Effect.provide([Logger.layer([Logger.consolePretty()]), NodeServices.layer]),
 );
+
+if (import.meta.main) {
+  NodeRuntime.runMain(
+    runtimeProgram as Effect.Effect<
+      void,
+      BuildScriptError | CliError.CliError | Config.ConfigError | Schema.SchemaError,
+      never
+    >,
+  );
+}
