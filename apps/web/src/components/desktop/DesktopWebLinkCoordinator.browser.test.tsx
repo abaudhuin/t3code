@@ -15,6 +15,8 @@ const state = vi.hoisted(() => ({
   openScratchProject: vi.fn(async () => null),
   confirm: vi.fn(async (_message: string) => true),
   connectPairing: vi.fn(async (_input: { pairingUrl: string }) => ({ _tag: "Success" })),
+  connectSsh: vi.fn(async (_input: unknown) => ({ _tag: "Success" })),
+  discoverSshHosts: vi.fn(async (): Promise<unknown[]> => []),
   localEnvironmentDisabled: false,
 }));
 
@@ -86,6 +88,7 @@ vi.mock(import("../../confirmDialog"), async (original) => ({
 vi.mock(import("../../connection/onboarding"), async (original) => ({
   ...(await original()),
   connectPairing: "connectPairing" as never,
+  connectSshEnvironment: "connectSsh" as never,
 }));
 vi.mock(import("../../state/use-atom-command"), async (original) => {
   const actual = await original();
@@ -94,7 +97,9 @@ vi.mock(import("../../state/use-atom-command"), async (original) => {
     useAtomCommand: ((command: unknown, options: never) =>
       command === "connectPairing"
         ? state.connectPairing
-        : actual.useAtomCommand(command as never, options)) as never,
+        : command === "connectSsh"
+          ? state.connectSsh
+          : actual.useAtomCommand(command as never, options)) as never,
   };
 });
 
@@ -164,6 +169,7 @@ async function mount(...urls: string[]) {
   stack.use(
     stubGlobal("desktopBridge", {
       getClientSettings: async () => null,
+      discoverSshHosts: state.discoverSshHosts,
       webLinks: {
         onOpen: (listener: (url: string) => void) => {
           deliver = listener;
@@ -327,6 +333,41 @@ it("pairs with Local environment disabled, where there is no primary environment
   await vi.waitFor(() =>
     expect(state.connectPairing).toHaveBeenCalledExactlyOnceWith({ pairingUrl }),
   );
+});
+
+const sshTarget = { alias: "devbox", hostname: "10.0.0.5", username: "dev", port: 2222 };
+
+it("adds an SSH config host from a link after the user confirms it", async () => {
+  setup();
+  state.discoverSshHosts.mockResolvedValueOnce([{ ...sshTarget, source: "ssh-config" }]);
+  await using _coordinator = await mount("t3code://ssh?alias=devbox");
+  await vi.waitFor(() =>
+    expect(state.connectSsh).toHaveBeenCalledExactlyOnceWith({ target: sshTarget, label: "" }),
+  );
+  expect(state.confirm).toHaveBeenCalledExactlyOnceWith("Add the SSH host devbox?");
+});
+
+it("does not connect an SSH host when the user declines", async () => {
+  setup();
+  state.discoverSshHosts.mockResolvedValueOnce([{ ...sshTarget, source: "ssh-config" }]);
+  state.confirm.mockResolvedValueOnce(false);
+  await using _coordinator = await mount("t3code://ssh?alias=devbox");
+  await vi.waitFor(() => expect(state.confirm).toHaveBeenCalledOnce());
+  await act(async () => undefined);
+  expect(state.connectSsh).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["missing from discovery", []],
+  ["only in known_hosts", [{ ...sshTarget, source: "known-hosts" }]],
+])("refuses an SSH link for a host %s without prompting", async (_name, hosts) => {
+  setup();
+  state.discoverSshHosts.mockResolvedValueOnce(hosts);
+  await using _coordinator = await mount("t3code://ssh?alias=devbox");
+  await vi.waitFor(() => expect(state.discoverSshHosts).toHaveBeenCalledOnce());
+  await act(async () => undefined);
+  expect(state.confirm).not.toHaveBeenCalled();
+  expect(state.connectSsh).not.toHaveBeenCalled();
 });
 
 it("holds a launch PR link with Local environment disabled until discovery settles", async () => {

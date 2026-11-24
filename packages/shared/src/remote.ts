@@ -6,6 +6,8 @@ const PAIRING_TOKEN_PARAM = "token";
 const HOSTED_PAIRING_HOST_PARAM = "host";
 const HOSTED_PAIRING_LABEL_PARAM = "label";
 const PAIRING_APP_LINK_PARAM = "pairingUrl";
+const SSH_APP_LINK_ALIAS_PARAM = "alias";
+const SSH_APP_LINK_ALIAS = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const APP_LINK_PROTOCOL = /^t3code(?:-[a-z]+)?:$/;
 const SUPPORTED_REMOTE_BACKEND_PROTOCOLS = new Set(["http:", "https:", "ws:", "wss:"]);
 
@@ -200,6 +202,16 @@ export const readPairingAppLink = (value: string): string | null => {
   if (!APP_LINK_PROTOCOL.test(url.protocol) || url.host !== "pair") return null;
   if (url.pathname !== "" && url.pathname !== "/") return null;
   return url.searchParams.get(PAIRING_APP_LINK_PARAM)?.trim() || null;
+};
+
+/** Reads the SSH config alias from a `t3code://ssh` link. A leading dash can never be an alias. */
+export const readSshAppLink = (value: string): string | null => {
+  const url = parseUrl(value);
+  if (!url) return null;
+  if (!APP_LINK_PROTOCOL.test(url.protocol) || url.host !== "ssh") return null;
+  if (url.pathname !== "" && url.pathname !== "/") return null;
+  const alias = url.searchParams.get(SSH_APP_LINK_ALIAS_PARAM);
+  return alias !== null && SSH_APP_LINK_ALIAS.test(alias) ? alias : null;
 };
 
 export const resolveRemotePairingTarget = (input: {

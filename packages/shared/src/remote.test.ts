@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildPairingAppLink,
   readPairingAppLink,
+  readSshAppLink,
   RemoteBackendUrlMissingError,
   RemotePairingTokenMissingError,
   RemotePairingUrlInvalidError,
@@ -158,5 +159,17 @@ describe("remote", () => {
     expect(
       readPairingAppLink(`https://pair?pairingUrl=${encodeURIComponent(pairingUrl)}`),
     ).toBeNull();
+  });
+
+  it("reads an SSH config alias from an app link", () => {
+    expect(readSshAppLink("t3code://ssh?alias=devbox.prod-1")).toBe("devbox.prod-1");
+    expect(readSshAppLink("t3code-dev://ssh?alias=devbox")).toBe("devbox");
+    expect(readSshAppLink("t3code://ssh")).toBeNull();
+    expect(readSshAppLink("t3code://ssh/other?alias=devbox")).toBeNull();
+    expect(readSshAppLink("t3code://pair?alias=devbox")).toBeNull();
+    expect(readSshAppLink("https://ssh?alias=devbox")).toBeNull();
+    for (const alias of ["-oProxyCommand=id", "user@host", "dev box", "host:22", "a/b", ""]) {
+      expect(readSshAppLink(`t3code://ssh?alias=${encodeURIComponent(alias)}`)).toBeNull();
+    }
   });
 });

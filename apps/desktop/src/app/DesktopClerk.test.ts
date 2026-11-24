@@ -454,6 +454,8 @@ it.effect("hands web and app links to the renderer and leaves other links alone"
       assert.strictEqual(open("t3code://new?prompt=hi"), 1);
       assert.strictEqual(open("t3code://threads/env-1/thread-1"), 1);
       assert.strictEqual(open(pairLink), 1);
+      assert.strictEqual(open("t3code://ssh?alias=devbox"), 1);
+      assert.strictEqual(open("t3code://ssh?alias=-oProxyCommand%3Did"), 0);
       assert.strictEqual(open("t3code://pair"), 0);
       assert.strictEqual(open("mailto:hello@example.com"), 0);
       assert.strictEqual(open("t3code://somewhere-else"), 0);
@@ -464,6 +466,7 @@ it.effect("hands web and app links to the renderer and leaves other links alone"
         "t3code://new?prompt=hi",
         "t3code://threads/env-1/thread-1",
         pairLink,
+        "t3code://ssh?alias=devbox",
       ]);
     }).pipe(
       Effect.provide(layerDesktopClerk(true, [], "darwin", undefined, undefined, listeners)),

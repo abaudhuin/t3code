@@ -5,10 +5,14 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
+import type { DesktopDiscoveredSshHost, EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { promptLinkAppPath } from "@t3tools/shared/promptLinks";
-import { readPairingAppLink, resolveRemotePairingTarget } from "@t3tools/shared/remote";
+import {
+  readPairingAppLink,
+  readSshAppLink,
+  resolveRemotePairingTarget,
+} from "@t3tools/shared/remote";
 import { useRouter } from "@tanstack/react-router";
 import * as Effect from "effect/Effect";
 import { AtomRegistry } from "effect/reactivity";
@@ -19,7 +23,7 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { openFileInPreview, openUrlInPreview } from "../../browser/openFileInPreview";
 import { isPreviewAvailableFor } from "../../browser/previewRuntime";
 import { requestConfirmDialog } from "../../confirmDialog";
-import { connectPairing } from "../../connection/onboarding";
+import { connectPairing, connectSshEnvironment } from "../../connection/onboarding";
 import { isLocalEnvironmentDisabled } from "../../localEnvironment";
 import { useComposerDraftStore } from "../../composerDraftStore";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
@@ -95,6 +99,7 @@ export function DesktopWebLinkCoordinator() {
     refresh: true,
   });
   const connectPairingEnvironment = useAtomCommand(connectPairing, { reportFailure: false });
+  const connectSshHost = useAtomCommand(connectSshEnvironment, { reportFailure: false });
   const httpBaseUrl = useEnvironmentHttpBaseUrl(primaryEnvironment?.environmentId ?? null);
   const queueRef = useRef(Promise.resolve());
   const pairedUrlsRef = useRef(new Set<string>());
@@ -144,6 +149,44 @@ export function DesktopWebLinkCoordinator() {
       return;
     }
     pairedUrlsRef.current.add(pairingUrl);
+    toastManager.add({
+      type: "success",
+      title: gt("Backend added"),
+      description: gt("The environment is saved and will reconnect on app startup."),
+    });
+  };
+
+  // Any page can open this link, so it only reaches hosts the user already put in their SSH config,
+  // and only after they confirm.
+  const addSshHostFromLink = async (alias: string) => {
+    let hosts: ReadonlyArray<DesktopDiscoveredSshHost>;
+    try {
+      hosts = (await window.desktopBridge?.discoverSshHosts()) ?? [];
+    } catch (error) {
+      reportPairingFailure(error);
+      return;
+    }
+    const host = hosts.find((entry) => entry.source === "ssh-config" && entry.alias === alias);
+    if (host === undefined) {
+      reportPairingFailure(new Error(gt("{alias} is not in your SSH config.", { alias })));
+      return;
+    }
+    const confirmed =
+      (await requestConfirmDialog(gt("Add the SSH host {alias}?", { alias }))) ?? false;
+    if (!confirmed) return;
+    const result = await connectSshHost({
+      target: {
+        alias: host.alias,
+        hostname: host.hostname,
+        username: host.username,
+        port: host.port,
+      },
+      label: "",
+    });
+    if (result._tag === "Failure") {
+      if (!isAtomCommandInterrupted(result)) reportPairingFailure(squashAtomCommandFailure(result));
+      return;
+    }
     toastManager.add({
       type: "success",
       title: gt("Backend added"),
@@ -209,6 +252,11 @@ export function DesktopWebLinkCoordinator() {
     const pairingUrl = readPairingAppLink(url);
     if (pairingUrl !== null) {
       await pairFromLink(pairingUrl);
+      return;
+    }
+    const sshAlias = readSshAppLink(url);
+    if (sshAlias !== null) {
+      await addSshHostFromLink(sshAlias);
       return;
     }
     const appPath = promptLinkAppPath(url);
